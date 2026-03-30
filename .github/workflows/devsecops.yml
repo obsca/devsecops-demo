@@ -41,7 +41,7 @@ jobs:
       - name: Run tests
         run: pytest -v --cov=app
       - name: Upload coverage
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: htmlcov/
