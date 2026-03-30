@@ -1,0 +1,89 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ "dev" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      allow_deploy:
+        description: "Override security gate? (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+
+  sast:
+    runs-on: ubuntu-latest
+    outputs:
+      has_vulns: ${{ steps.check.outputs.has_vulns }}
+    steps:
+      - uses: actions/checkout@v3
+      - run: pip install bandit flake8 mypy jq
+      - name: Run Bandit
+        run: bandit -r app -f json -o report.json || true
+      - name: Check vulnerabilities
+        id: check
+        run: |
+          if jq -e '.results[] | select(.issue_severity=="HIGH" or .issue_severity=="MEDIUM")' report.json > /dev/null; then
+            echo "has_vulns=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_vulns=false" >> $GITHUB_OUTPUT
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: sast
+    steps:
+      - uses: actions/checkout@v3
+      - run: pip install -r requirements.txt
+      - name: Run tests
+        run: pytest -v --cov=app
+      - name: Upload coverage
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build Docker image
+        run: docker build -t myapp:${{ github.sha }} .
+      - name: Push Docker image
+        run: |
+          echo "${{ secrets.DOCKER_PASS }}" | docker login -u "${{ secrets.DOCKER_USER }}" --password-stdin
+          docker tag myapp:${{ github.sha }} myrepo/myapp:${{ github.sha }}
+          docker push myrepo/myapp:${{ github.sha }}
+
+  deploy_staging:
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+      - name: Deploy to Staging
+        run: echo "Deploying ${GITHUB_SHA} to staging..."
+
+  dast:
+    runs-on: ubuntu-latest
+    needs: deploy_staging
+    steps:
+      - name: Run OWASP ZAP scan
+        run: |
+          docker run -t owasp/zap2docker-stable zap-full-scan.py -t http://staging.myapp.local -r zap_report.html
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v3
+        with:
+          name: dast-report
+          path: zap_report.html
+
+  deploy_prod:
+    runs-on: ubuntu-latest
+    needs: [sast, dast]
+    if: github.event.inputs.allow_deploy == 'true'
+    steps:
+      - name: Confirm Deploy
+        run: echo " Production deploy confirmed"
+      - name: Deploy
+        run: echo " Deploying to production..."
